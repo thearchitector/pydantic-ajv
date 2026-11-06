@@ -583,3 +583,79 @@ def test_default_collections() -> None:
         },
         {"if": {"allOf": [omitted("primary"), omitted("tags")]}, "then": False},
     ]
+
+
+def test_required_operand_with_a_defaulted_field() -> None:
+    class Bounds(BaseModel):
+        low: int = 10
+        high: int
+
+        @rule
+        @classmethod
+        def ordered(cls, x: RuleModel) -> Rule:
+            return x.low <= x.high
+
+    # An omitted low is checked as 10 <= high, so the result doesn't depend on
+    # whether Ajv's useDefaults has inserted it yet. high is required and has no
+    # default, so it needs no branch.
+    assert Bounds.model_json_schema()["allOf"] == [
+        {
+            "title": "ordered",
+            "allOf": [
+                {
+                    "if": {"allOf": [present("low"), present("high")]},
+                    "then": {
+                        "type": "object",
+                        "properties": {
+                            "low": {"type": "number", "maximum": {"$data": "1/high"}}
+                        },
+                    },
+                },
+                {
+                    "if": {"allOf": [omitted("low"), present("high")]},
+                    "then": {
+                        "type": "object",
+                        "properties": {"high": {"type": "number", "minimum": 10}},
+                    },
+                },
+            ],
+        }
+    ]
+
+
+def test_missing_dictionary_keys_skip_the_check() -> None:
+    class Budget(BaseModel):
+        limits: dict[str, int]
+
+        @rule
+        @classmethod
+        def ordered(cls, x: RuleModel) -> Rule:
+            return x.limits["low"] <= x.limits["high"]
+
+    # Dictionary keys have no defaults: the check applies only when both exist,
+    # and a document missing either matches no branch and passes.
+    assert Budget.model_json_schema()["allOf"] == [
+        {
+            "title": "ordered",
+            "if": {
+                "allOf": [
+                    under("limits", present("low")),
+                    under("limits", present("high")),
+                ]
+            },
+            "then": {
+                "type": "object",
+                "properties": {
+                    "limits": {
+                        "type": "object",
+                        "properties": {
+                            "low": {
+                                "type": "number",
+                                "maximum": {"$data": "2/limits/high"},
+                            }
+                        },
+                    }
+                },
+            },
+        }
+    ]
