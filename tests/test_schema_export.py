@@ -7,7 +7,15 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import pytest
-from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field, RootModel
+from pydantic import (
+    AliasChoices,
+    AliasPath,
+    BaseModel,
+    ConfigDict,
+    Field,
+    RootModel,
+    field_validator,
+)
 from pydantic.json_schema import JsonSchemaValue
 
 from pydantic_ajv import Rule, RuleModel, rule
@@ -95,8 +103,10 @@ def test_nested_default_schema(validated: bool) -> None:
         def check(cls, x: RuleModel) -> Rule:
             return x.child.value > 3
 
-    # An omitted child is skipped either way: its default is an unvalidated dict
-    # or, when validated, isn't evaluated. An omitted value uses its default, 3.
+    # An unvalidated child default is a dict without a value, so its omission is
+    # skipped; validated, it is Child(v=3), which fails. An omitted value uses its
+    # default, 3, which fails too.
+    omitted_child = [{"if": omitted("child"), "then": False}] if validated else []
     assert Parent.model_json_schema()["allOf"] == [
         {
             "title": "check",
@@ -125,6 +135,7 @@ def test_nested_default_schema(validated: bool) -> None:
                         },
                     },
                 },
+                *omitted_child,
                 {
                     "if": {
                         "type": "object",
@@ -335,20 +346,97 @@ def under(key: str, leaf: JsonSchemaValue) -> JsonSchemaValue:
 def test_defaults_without_a_known_value_are_skipped() -> None:
     class Defaults(BaseModel):
         model_config = ConfigDict(validate_default=True)
-        validated: int = 9
-        produced: int = Field(default_factory=lambda: 9)
-        nested: int = Field(default=9, validation_alias=AliasPath("a", "b"))
+        invalid: int = "nine"  # type: ignore[assignment]
+        produced: int = Field(default_factory=lambda data: 9)
+        negative: int = Field(default=9, validation_alias=AliasPath("a", -1))
         limit: int
 
         @rule
         @classmethod
         def check(cls, x: RuleModel) -> Rule:
             return (
-                (x.validated < x.limit) & (x.produced < x.limit) & (x.nested < x.limit)
+                (x.invalid < x.limit) & (x.produced < x.limit) & (x.negative < x.limit)
             )
 
     # Each omission still skips its check, so Ajv stays more lenient.
     assert "not" not in json.dumps(Defaults.model_json_schema()["allOf"])
+
+
+def test_produced_validated_and_nested_defaults() -> None:
+    class Defaults(BaseModel):
+        produced: int = Field(default_factory=lambda: 9)
+        validated: int = Field(default="4", validate_default=True)
+        nested: int = Field(default=9, validation_alias=AliasPath("a", 0, "b"))
+
+        @field_validator("validated")
+        @classmethod
+        def double(cls, value: int) -> int:
+            return value * 2
+
+        @rule
+        @classmethod
+        def produced_small(cls, x: RuleModel) -> Rule:
+            return x.produced < 5
+
+        @rule
+        @classmethod
+        def validated_large(cls, x: RuleModel) -> Rule:
+            return x.validated > 6
+
+        @rule
+        @classmethod
+        def nested_small(cls, x: RuleModel) -> Rule:
+            return x.nested < 5
+
+    produced, validated, nested = Defaults.model_json_schema()["allOf"]
+    # The factory produces 9, which fails.
+    assert produced["allOf"][1] == {"if": omitted("produced"), "then": False}
+    # "4" validates to 8, which passes and needs no branch.
+    assert "allOf" not in validated
+    # Pydantic reads nested from a[0].b, so that path must not resolve.
+    assert nested["allOf"][1] == {
+        "if": {
+            "type": "object",
+            "not": {
+                "required": ["a"],
+                "properties": {
+                    "a": {
+                        "type": "array",
+                        "prefixItems": [
+                            {
+                                "type": "object",
+                                "properties": {"b": True},
+                                "required": ["b"],
+                            }
+                        ],
+                        "minItems": 1,
+                    }
+                },
+            },
+        },
+        "then": False,
+    }
+
+
+def test_validated_defaults_in_recursive_models() -> None:
+    class Node(BaseModel):
+        value: int = Field(default="2", validate_default=True)
+        child: Node | None = None
+
+        @field_validator("value")
+        @classmethod
+        def negate(cls, value: int) -> int:
+            return -value
+
+        @rule
+        @classmethod
+        def positive(cls, x: RuleModel) -> Rule:
+            return x.value > 0
+
+    # Recursive models keep their fields behind a definition reference; "2"
+    # still validates to -2, which fails.
+    branches = Node.model_json_schema()["$defs"]["Node"]["allOf"][0]["allOf"]
+    assert branches[1] == {"if": omitted("value"), "then": False}
 
 
 def test_omitted_parents_use_their_defaults() -> None:

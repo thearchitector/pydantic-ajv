@@ -378,7 +378,7 @@ def test_python_operators_keep_native_boolean_number_equality() -> None:
         Example(value=False)
 
 
-def test_default_factory_is_not_called_by_construction_or_dumping() -> None:
+def test_default_factory_is_called_by_dumping_not_construction() -> None:
     calls: list[str] = []
 
     def default() -> int:
@@ -394,11 +394,16 @@ def test_default_factory_is_not_called_by_construction_or_dumping() -> None:
             return x.value > 0
 
     assert calls == []
-    assert Example.model_json_schema()
-    assert calls == []
+    # The omitted value is checked against what the factory produces, 0.
+    branches = Example.model_json_schema()["allOf"][0]["allOf"]
+    assert branches[1] == {
+        "if": {"type": "object", "not": {"required": ["value"]}},
+        "then": False,
+    }
+    assert calls == ["called"]
     with pytest.raises(ValidationError):
         Example()
-    assert calls == ["called"]
+    assert calls == ["called", "called"]
 
 
 def test_each_model_dumps_its_own_defaults() -> None:

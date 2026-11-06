@@ -590,10 +590,10 @@ def test_conflicting_union_defaults_and_aliases() -> None:
     )
 
 
-def test_factory_runs_only_during_model_validation() -> None:
+def test_data_factory_runs_only_during_model_validation() -> None:
     calls = []
 
-    def make_default() -> int:
+    def make_default(data: dict[str, object]) -> int:
         calls.append(1)
         return 3
 
@@ -605,6 +605,7 @@ def test_factory_runs_only_during_model_validation() -> None:
         def positive(cls, x: RuleModel) -> Rule:
             return x.value > 0
 
+    # A factory reading validated data has no value at export.
     assert calls == []
     Factory.model_json_schema()
     assert calls == []

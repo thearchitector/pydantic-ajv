@@ -18,7 +18,14 @@ from pydantic import (
 )
 from pydantic.fields import FieldInfo
 from pydantic.json_schema import JsonSchemaValue
-from pydantic_core import PydanticUndefined, PydanticUndefinedType, core_schema
+from pydantic_core import (
+    CoreSchema,
+    PydanticUndefined,
+    PydanticUndefinedType,
+    SchemaValidator,
+    ValidationError,
+    core_schema,
+)
 
 from .validation import (
     JsonLiteral,
@@ -255,39 +262,81 @@ class ModelStep:
     def default(self) -> object:
         """The value an instance holds when the field is omitted, or ``MISSING``.
 
-        Factories aren't called and validated defaults aren't evaluated, so an
+        As in Pydantic, a factory is called and a validated default is passed
+        through the field's own validator. A factory that reads validated data,
+        or a default that fails validation, has no value known at export, so an
         omitted field with either still skips the check.
         """
         info = self.field
+        if info.is_required() or info.default_factory_takes_validated_data:
+            return MISSING
+        value = info.get_default(call_default_factory=True)
         validated = (
             info.validate_default
             if info.validate_default is not None
             else self.model.model_config.get("validate_default", False)
         )
-        if info.is_required() or info.default_factory is not None or validated:
+        if not validated:
+            return value
+        validator = field_validator(self.model, self.key)
+        if validator is None:
             return MISSING
-        return info.default
+        try:
+            return validator.validate_python(value)
+        except ValidationError:
+            return MISSING
 
-    def input_names(self) -> tuple[str, ...] | None:
-        """Every top-level key Pydantic may read this field from, or None."""
+    def input_paths(self) -> tuple[Path, ...] | None:
+        """Every location Pydantic may read this field from, or None."""
         alias = self.field.validation_alias or self.field.alias
         if alias is None:
-            return (self.key,)
+            return ((self.key,),)
         config = self.model.model_config
-        names = (
-            {self.key}
+        paths: set[Path] = (
+            {(self.key,)}
             if config.get("validate_by_name") or config.get("populate_by_name")
             else set()
         )
         if config.get("validate_by_alias", True):
             for choice in alias.choices if isinstance(alias, AliasChoices) else [alias]:
-                if isinstance(choice, str):
-                    names.add(choice)
-                elif len(choice.path) == 1 and isinstance(choice.path[0], str):
-                    names.add(choice.path[0])
-                else:
+                path = (choice,) if isinstance(choice, str) else tuple(choice.path)
+                # A negative index counts from the end, which JSON Schema can't address.
+                if any(type(key) is int and key < 0 for key in path):
                     return None
-        return tuple(sorted(names))
+                paths.add(path)
+        return tuple(
+            sorted(paths, key=lambda path: [(type(k) is int, str(k)) for k in path])
+        )
+
+
+def field_validator(model: type[BaseModel], key: str) -> SchemaValidator | None:
+    """A validator for one model field alone, without the model's own validators."""
+    core: Mapping[str, Any] = model.__pydantic_core_schema__
+    definitions: list[CoreSchema] = []
+    if core["type"] == "definitions":
+        definitions = core["definitions"]
+        core = core["schema"]
+    refs = {definition.get("ref"): definition for definition in definitions}
+    while core["type"] != "model":
+        if core["type"] == "definition-ref" and core["schema_ref"] in refs:
+            core = refs[core["schema_ref"]]
+        elif "schema" in core:
+            core = core["schema"]
+        else:
+            return None
+    if core["cls"] is not model:
+        return None
+    fields = core["schema"]
+    while fields["type"] != "model-fields" and "schema" in fields:
+        fields = fields["schema"]
+    if fields["type"] != "model-fields" or key not in fields["fields"]:
+        return None
+    inner = fields["fields"][key]["schema"]
+    if inner["type"] == "default":
+        inner = inner["schema"]
+    if definitions:
+        inner = core_schema.definitions_schema(inner, definitions)
+    return SchemaValidator(inner, core.get("config"))
 
 
 type Step = ContainerStep | ModelStep
@@ -310,12 +359,15 @@ def lookup(value: object, path: Path) -> object:
     return value
 
 
-def absent(names: tuple[str, ...]) -> Schema:
-    required = [{"required": [name]} for name in names]
-    return {
-        "type": "object",
-        "not": required[0] if len(required) == 1 else {"anyOf": required},
-    }
+def absent(paths: tuple[Path, ...]) -> Schema:
+    """No path resolves in an object, as when Pydantic finds no input for a field."""
+    found: list[Schema] = []
+    for first, *rest in paths:
+        resolved: JsonSchemaValue = {"required": [first]}
+        if rest:
+            resolved["properties"] = {first: at(tuple(rest), True, required=True)}
+        found.append(resolved)
+    return {"type": "object", "not": found[0] if len(found) == 1 else {"anyOf": found}}
 
 
 def conjunction(parts: list[Schema]) -> Schema:
@@ -556,10 +608,13 @@ class Reference[T]:
         parent: Path,
         step: ModelStep,
     ) -> Default[T] | None:
-        value, names = step.default(), step.input_names()
-        if value is MISSING or names is None:
+        paths = step.input_paths()
+        if paths is None:
             return None
-        conditions = [at(parent, absent(names), required=True)]
+        value = step.default()
+        if value is MISSING:
+            return None
+        conditions = [at(parent, absent(paths), required=True)]
         for guard in self._guards:
             guarded = guard.reference._path
             if len(guarded) <= index:
