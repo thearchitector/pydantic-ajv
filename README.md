@@ -132,7 +132,14 @@ Project(budget=Budget(limit=100), costs={"total": 80}, milestones=[1, 3])
 ```
 
 A missing dictionary key or array index skips that individual check. Use
-Pydantic fields and collection constraints to require values. For model fields
+Pydantic fields and collection constraints to require values.
+
+An omitted model field with a default is not missing: Pydantic checks the
+default, and the exported schema does too, so `{}` fails both for a model with
+`low: int = 9`, `high: int = 0` and the rule `x.low < x.high`. Defaults the
+schema can't know at export time still skip the check when omitted: a
+`default_factory`, a default Pydantic validates (`validate_default=True`), and
+a field read through a nested `AliasPath`. For model fields
 whose names collide with helpers, use brackets, such as `x["when"]`.
 
 ## Apply rules conditionally

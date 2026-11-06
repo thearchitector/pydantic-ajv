@@ -332,3 +332,11 @@ def test_definition_decorator_preserves_signatures_and_body_errors() -> None:
 
     with pytest.raises(ValidationError):
         invalid_body(1)
+
+
+def test_uniqueness_rebuilds_only_over_a_reference() -> None:
+    items = reference(list[dict[str, int]], "items")
+    unique = Uniqueness(items, Projection.for_collection(items, "id"))
+    assert unique.rebuild(items, LiteralValue("id")) == unique
+    with pytest.raises(RuleDefinitionError, match="model reference"):
+        unique.rebuild(LiteralValue([]), LiteralValue("id"))

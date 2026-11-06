@@ -2,11 +2,12 @@
 
 import json
 from collections.abc import Callable
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal
 
 import pytest
-from pydantic import AliasChoices, BaseModel, Field, RootModel
+from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field, RootModel
 from pydantic.json_schema import JsonSchemaValue
 
 from pydantic_ajv import Rule, RuleModel, rule
@@ -94,30 +95,47 @@ def test_nested_default_schema(validated: bool) -> None:
         def check(cls, x: RuleModel) -> Rule:
             return x.child.value > 3
 
-    # Rules reference raw JSON only, regardless of Pydantic default validation.
+    # An omitted child is skipped either way: its default is an unvalidated dict
+    # or, when validated, isn't evaluated. An omitted value uses its default, 3.
     assert Parent.model_json_schema()["allOf"] == [
         {
             "title": "check",
-            "if": {
-                "type": "object",
-                "properties": {
-                    "child": {
+            "allOf": [
+                {
+                    "if": {
                         "type": "object",
-                        "properties": {"v": True},
-                        "required": ["v"],
-                    }
-                },
-                "required": ["child"],
-            },
-            "then": {
-                "type": "object",
-                "properties": {
-                    "child": {
+                        "properties": {
+                            "child": {
+                                "type": "object",
+                                "properties": {"v": True},
+                                "required": ["v"],
+                            }
+                        },
+                        "required": ["child"],
+                    },
+                    "then": {
                         "type": "object",
-                        "properties": {"v": {"type": "number", "exclusiveMinimum": 3}},
-                    }
+                        "properties": {
+                            "child": {
+                                "type": "object",
+                                "properties": {
+                                    "v": {"type": "number", "exclusiveMinimum": 3}
+                                },
+                            }
+                        },
+                    },
                 },
-            },
+                {
+                    "if": {
+                        "type": "object",
+                        "properties": {
+                            "child": {"type": "object", "not": {"required": ["v"]}}
+                        },
+                        "required": ["child"],
+                    },
+                    "then": False,
+                },
+            ],
         }
     ]
 
@@ -292,3 +310,188 @@ def test_rules_are_independently_required() -> None:
             return x.root < 10
 
     assert Value.model_json_schema() == reference("independent_rules.json")
+
+
+def default_branches(model: type[BaseModel]) -> list[JsonSchemaValue]:
+    """The branches a model's only rule adds for omitted fields."""
+    fragment = model.model_json_schema()["allOf"][0]
+    branches = fragment.get("allOf", [fragment])
+    assert all("if" in branch for branch in branches)
+    return branches[1:]
+
+
+def omitted(*names: str) -> JsonSchemaValue:
+    required = [{"required": [name]} for name in names]
+    return {
+        "type": "object",
+        "not": required[0] if len(required) == 1 else {"anyOf": required},
+    }
+
+
+def under(key: str, leaf: JsonSchemaValue) -> JsonSchemaValue:
+    return {"type": "object", "properties": {key: leaf}, "required": [key]}
+
+
+def test_defaults_without_a_known_value_are_skipped() -> None:
+    class Defaults(BaseModel):
+        model_config = ConfigDict(validate_default=True)
+        validated: int = 9
+        produced: int = Field(default_factory=lambda: 9)
+        nested: int = Field(default=9, validation_alias=AliasPath("a", "b"))
+        limit: int
+
+        @rule
+        @classmethod
+        def check(cls, x: RuleModel) -> Rule:
+            return (
+                (x.validated < x.limit) & (x.produced < x.limit) & (x.nested < x.limit)
+            )
+
+    # Each omission still skips its check, so Ajv stays more lenient.
+    assert "not" not in json.dumps(Defaults.model_json_schema()["allOf"])
+
+
+def test_omitted_parents_use_their_defaults() -> None:
+    class Leaf(BaseModel):
+        value: int = Field(alias="v", default=4)
+
+    class Middle(BaseModel):
+        leaf: Leaf = Leaf(v=1)
+
+    class Root(BaseModel):
+        middle: Middle = Middle()
+
+        @rule
+        @classmethod
+        def large(cls, x: RuleModel) -> Rule:
+            return x.middle.leaf.value > 2
+
+    # middle and leaf default to a value of 1, which fails; v defaults to 4, which
+    # passes and needs no branch.
+    assert default_branches(Root) == [
+        {"if": omitted("middle"), "then": False},
+        {"if": under("middle", omitted("leaf")), "then": False},
+    ]
+
+
+def test_static_guards_and_json_values() -> None:
+    class Kind(StrEnum):
+        A = "a"
+        B = "b"
+
+    class Child(BaseModel):
+        value: int = 4
+
+    class Example(BaseModel):
+        child: Child | None = None
+        kind: Kind = Kind.B
+        expected: str
+
+        @rule
+        @classmethod
+        def large(cls, x: RuleModel) -> Rule:
+            return x.child.when(Child).value > 5
+
+    class Matching(Example):
+        @rule
+        @classmethod
+        def matching(cls, x: RuleModel) -> Rule:
+            return x.kind == x.expected
+
+    # A null child fails the guard, so only an omitted value needs a branch.
+    guard = under("child", {"type": "object"})
+    assert default_branches(Example) == [
+        {"if": {"allOf": [under("child", omitted("value")), guard]}, "then": False}
+    ]
+    matching = Matching.model_json_schema()["allOf"][1]["allOf"][1]
+    assert matching == {
+        "if": {
+            "allOf": [
+                omitted("kind"),
+                {
+                    "type": "object",
+                    "properties": {"expected": True},
+                    "required": ["expected"],
+                },
+            ]
+        },
+        "then": {"type": "object", "properties": {"expected": {"const": "b"}}},
+    }
+
+
+def present(key: str) -> JsonSchemaValue:
+    return {"type": "object", "properties": {key: True}, "required": [key]}
+
+
+def test_defaults_cover_every_input_name() -> None:
+    class Bounds(BaseModel):
+        model_config = ConfigDict(populate_by_name=True)
+        low: int = Field(alias="lo", default=7)
+        high: int = Field(
+            validation_alias=AliasChoices("upper", AliasPath("high")), default=3
+        )
+
+        @rule
+        @classmethod
+        def ordered(cls, x: RuleModel) -> Rule:
+            return x.low < x.high
+
+    # Pydantic reads each field from any of its names, so all must be absent.
+    assert default_branches(Bounds) == [
+        {
+            "if": {"allOf": [omitted("high", "upper"), present("lo")]},
+            "then": {
+                "type": "object",
+                "properties": {"lo": {"type": "number", "exclusiveMaximum": 3}},
+            },
+        },
+        {
+            "if": {"allOf": [omitted("lo", "low"), present("upper")]},
+            "then": {
+                "type": "object",
+                "properties": {"upper": {"type": "number", "exclusiveMinimum": 7}},
+            },
+        },
+        {
+            "if": {"allOf": [omitted("lo", "low"), omitted("high", "upper")]},
+            "then": False,
+        },
+    ]
+
+
+def test_default_collections() -> None:
+    class Item(BaseModel):
+        sku: str
+
+    class Cart(BaseModel):
+        items: list[Item] = [Item(sku="a"), Item(sku="a")]
+
+        @rule
+        @classmethod
+        def unique(cls, x: RuleModel) -> Rule:
+            return x.items.unique_by("sku")
+
+    class Tagged(BaseModel):
+        tags: list[str] = ["x"]
+        primary: str = "y"
+
+        @rule
+        @classmethod
+        def tagged(cls, x: RuleModel) -> Rule:
+            return x.primary.in_(x.tags)
+
+    assert default_branches(Cart) == [{"if": omitted("items"), "then": False}]
+    assert default_branches(Tagged) == [
+        {
+            "if": {"allOf": [omitted("tags"), present("primary")]},
+            "then": {"type": "object", "properties": {"primary": {"enum": ["x"]}}},
+        },
+        {
+            "if": {"allOf": [omitted("primary"), present("tags")]},
+            "then": {
+                "type": "object",
+                "properties": {"tags": {"type": "array", "contains": {"const": "y"}}},
+            },
+        },
+        {"if": {"allOf": [omitted("primary"), omitted("tags")]}, "then": False},
+    ]

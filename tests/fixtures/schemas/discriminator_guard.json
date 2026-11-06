@@ -41,60 +41,106 @@
   },
   "allOf": [
     {
-      "if": {
-        "allOf": [
-          {
-            "properties": {
-              "child": {
+      "allOf": [
+        {
+          "if": {
+            "allOf": [
+              {
                 "properties": {
-                  "value": true
-                },
-                "required": [
-                  "value"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "child"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "child": {
-                "properties": {
-                  "kind": {
-                    "const": "number"
+                  "child": {
+                    "properties": {
+                      "value": true
+                    },
+                    "required": [
+                      "value"
+                    ],
+                    "type": "object"
                   }
                 },
                 "required": [
-                  "kind"
+                  "child"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "child": {
+                    "properties": {
+                      "kind": {
+                        "const": "number"
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "child"
                 ],
                 "type": "object"
               }
-            },
-            "required": [
-              "child"
-            ],
-            "type": "object"
-          }
-        ]
-      },
-      "then": {
-        "properties": {
-          "child": {
+            ]
+          },
+          "then": {
             "properties": {
-              "value": {
-                "exclusiveMinimum": 0,
-                "type": "number"
+              "child": {
+                "properties": {
+                  "value": {
+                    "exclusiveMinimum": 0,
+                    "type": "number"
+                  }
+                },
+                "type": "object"
               }
             },
             "type": "object"
           }
         },
-        "type": "object"
-      },
+        {
+          "if": {
+            "allOf": [
+              {
+                "properties": {
+                  "child": {
+                    "not": {
+                      "required": [
+                        "value"
+                      ]
+                    },
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "child"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "child": {
+                    "properties": {
+                      "kind": {
+                        "const": "number"
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "child"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "then": false
+        }
+      ],
       "title": "positive_number"
     }
   ],

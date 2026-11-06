@@ -20,8 +20,11 @@ and [`errorMessage`](https://ajv.js.org/packages/ajv-errors.html) extensions.
   remain distinct from numbers in mixed membership, and integers remain exact.
 - Object/array presence guards keep missing operands separate from explicit null.
   `missing.json` verifies that a missing operand skips atomic inequality.
-- `default_bounds.json` compares present bounds only. Pydantic default annotations
-  remain unchanged; rule export adds no fallback cases for omitted properties.
+- `default_bounds.json` checks an omitted bound with its default, as Pydantic
+  does: a present `low` must be below the default `high`, and a present `high`
+  above the default `low`. Omitting both needs no branch because the defaults,
+  2 and 5, already satisfy the rule. Pydantic default annotations remain
+  unchanged.
 - `$data` pointers are relative to the predicate subject: `1/allowed` refers to a
   sibling collection, `1/1` to array element 1, and `1/a~1b~0` to the sibling key
   `a/b~`. `1/` truthfully denotes an empty sibling key, regardless of the documented
@@ -29,9 +32,9 @@ and [`errorMessage`](https://ajv.js.org/packages/ajv-errors.html) extensions.
 - Nested and recursive definitions retain their own rule constraints. Serialization
   export is checked separately against a schema without rule constraints.
 - The discriminator guard only applies the number branch's positive-value rule
-  when `kind` is `number` and the value is present. Defaults belong to the consumer.
-  The text branch stays
-  unaffected, and the original discriminator mapping remains an annotation.
+  when `kind` is `number`. A number child that omits `value` holds the default
+  -1, so that case always fails. The text branch stays unaffected, and the
+  original discriminator mapping remains an annotation.
 - Independent rules remain separate required checks, never alternative branches.
 - Annotations are explicit output contracts, including cleaned documentation,
   omitted error messages, empty overrides, and literal escaped interpolation text.

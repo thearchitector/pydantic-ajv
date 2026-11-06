@@ -4,16 +4,18 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from itertools import combinations
+from itertools import combinations, product
 from operator import ge, gt, le, lt
+from typing import Self, cast
 
 from pydantic import BaseModel, GetJsonSchemaHandler, InstanceOf
 from pydantic.json_schema import JsonSchemaValue
-from pydantic_core import PydanticUndefinedType
+from pydantic_core import PydanticUndefinedType, to_jsonable_python
 
 from .references import (
     ArrayOperand,
     Data,
+    Default,
     LiteralCollection,
     LiteralValue,
     MembershipSubject,
@@ -89,7 +91,11 @@ class Node(ABC):
 
 
 class AtomicNode[Left, Right, SchemaLeft, SchemaRight](Node):
-    """Local guards and missing operands skip only this predicate."""
+    """Local guards and missing operands skip only this predicate.
+
+    An omitted model field with a default is not missing: as in Pydantic, the
+    predicate checks the default instead.
+    """
 
     @property
     @abstractmethod
@@ -97,6 +103,10 @@ class AtomicNode[Left, Right, SchemaLeft, SchemaRight](Node):
 
     @abstractmethod
     def test(self, left: Left, right: Right) -> bool: ...
+
+    @abstractmethod
+    def rebuild(self, left: Operand[Left], right: Operand[Right]) -> Self:
+        """This predicate over other operands, such as a default in place of a field."""
 
     @abstractmethod
     def constraint(self, left: SchemaLeft, right: SchemaRight) -> Schema: ...
@@ -115,14 +125,61 @@ class AtomicNode[Left, Right, SchemaLeft, SchemaRight](Node):
         self, handler: GetJsonSchemaHandler, schema: JsonSchemaValue
     ) -> tuple[SchemaLeft, SchemaRight]: ...
 
-    def dump(
-        self, handler: GetJsonSchemaHandler, schema: JsonSchemaValue
+    def branch(
+        self,
+        handler: GetJsonSchemaHandler,
+        schema: JsonSchemaValue,
+        conditions: list[Schema],
     ) -> JsonSchemaValue:
         condition = conjunction([
-            operand._condition(handler, schema) for operand in self.operands
+            *conditions,
+            *(operand._condition(handler, schema) for operand in self.operands),
         ])
         left, right = self.values(handler, schema)
         return {"if": condition, "then": self.constraint(left, right)}
+
+    def dump(
+        self, handler: GetJsonSchemaHandler, schema: JsonSchemaValue
+    ) -> JsonSchemaValue:
+        left, right = self.operands
+        branches = [self.branch(handler, schema, [])]
+        cases = product(
+            [None, *left._defaults(handler, schema)],
+            [None, *right._defaults(handler, schema)],
+        )
+        for left_case, right_case in cases:
+            if left_case is None and right_case is None:
+                continue
+            branch = self.default_branch(
+                handler, schema, (left, left_case), (right, right_case)
+            )
+            if branch is not None:
+                branches.append(branch)
+        return branches[0] if len(branches) == 1 else {"allOf": branches}
+
+    def default_branch(
+        self,
+        handler: GetJsonSchemaHandler,
+        schema: JsonSchemaValue,
+        left: tuple[Operand[Left], Default[Left] | None],
+        right: tuple[Operand[Right], Default[Right] | None],
+    ) -> JsonSchemaValue | None:
+        """Check the defaults statically, or rebuild with each default as a literal."""
+        conditions = [case.condition for _, case in (left, right) if case is not None]
+        (left_operand, left_case), (right_operand, right_case) = left, right
+        left_static = left_case is not None or isinstance(left_operand, LiteralValue)
+        right_static = right_case is not None or isinstance(right_operand, LiteralValue)
+        if left_static and right_static:
+            left_value = static(left_operand, left_case)
+            right_value = static(right_operand, right_case)
+            if self.test(left_value, right_value):
+                return None
+            return {"if": conjunction(conditions), "then": False}
+        node = self.rebuild(
+            left_operand if left_case is None else literal(left_case),
+            right_operand if right_case is None else literal(right_case),
+        )
+        return node.branch(handler, schema, conditions)
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +203,9 @@ class Equality(AtomicNode[Primitive, Primitive, Data, Primitive | Data]):
 
     def test(self, left: Primitive, right: Primitive) -> bool:
         return left == right if self.operator is EqualityOperator.EQ else left != right
+
+    def rebuild(self, left: Operand[Primitive], right: Operand[Primitive]) -> Self:
+        return type(self)(self.operator, left, right)
 
     def values(
         self, handler: GetJsonSchemaHandler, schema: JsonSchemaValue
@@ -191,6 +251,9 @@ class Ordering(AtomicNode[Number, Number, Data, Number | Data]):
     def test(self, left: Number, right: Number) -> bool:
         return self.operator.compare(left, right)
 
+    def rebuild(self, left: Operand[Number], right: Operand[Number]) -> Self:
+        return type(self)(self.operator, left, right)
+
     def values(
         self, handler: GetJsonSchemaHandler, schema: JsonSchemaValue
     ) -> tuple[Data, Number | Data]:
@@ -218,6 +281,13 @@ class Membership(
 
     def test(self, left: Primitive, right: PrimitiveArray) -> bool:
         return left in right
+
+    def rebuild(self, left: Operand[Primitive], right: Operand[PrimitiveArray]) -> Self:
+        # A literal collection is a list or tuple; construction checks it.
+        collection = cast(
+            Reference[PrimitiveArray] | LiteralValue[LiteralCollection], right
+        )
+        return type(self)(left, collection)
 
     def values(
         self, handler: GetJsonSchemaHandler, schema: JsonSchemaValue
@@ -267,6 +337,13 @@ class Uniqueness(AtomicNode[ObjectCollection, str, Data, str]):
             for a, b in combinations((lookup(item, (right,)) for item in left), 2)
         )
 
+    def rebuild(self, left: Operand[ObjectCollection], right: Operand[str]) -> Self:
+        # The property is always literal, so a defaulted collection is checked
+        # statically and never rebuilt.
+        if not isinstance(left, Reference):
+            raise RuleDefinitionError("unique_by requires a model reference")
+        return type(self)(left, self.projection)
+
     def values(
         self, handler: GetJsonSchemaHandler, schema: JsonSchemaValue
     ) -> tuple[Data, str]:
@@ -274,6 +351,18 @@ class Uniqueness(AtomicNode[ObjectCollection, str, Data, str]):
 
     def constraint(self, left: Data, right: str) -> Schema:
         return left.constrain({"type": "array", "uniqueItemProperties": [right]})
+
+
+def static[T](operand: Operand[T], case: Default[T] | None) -> T:
+    if case is not None:
+        return case.value
+    assert isinstance(operand, LiteralValue)
+    return operand.value
+
+
+def literal[T](case: Default[T]) -> LiteralValue[T]:
+    # Ajv compares JSON, so enum members and other Python values are dumped first.
+    return LiteralValue(cast(T, to_jsonable_python(case.value)))
 
 
 def comparison_operands[T](

@@ -10,6 +10,7 @@ from typing import Annotated, Any, Literal, TypeGuard, Union, cast, get_args, ge
 
 from pydantic import (
     AfterValidator,
+    AliasChoices,
     BaseModel,
     GetJsonSchemaHandler,
     InstanceOf,
@@ -36,6 +37,7 @@ __all__ = [
     "ArrayOperand",
     "ContainerStep",
     "Data",
+    "Default",
     "JsonKind",
     "LiteralCollection",
     "LiteralValue",
@@ -57,6 +59,7 @@ __all__ = [
     "SchemaScope",
     "Step",
     "TypeShape",
+    "absent",
     "at",
     "conjunction",
     "is_model",
@@ -249,6 +252,43 @@ class ModelStep:
             )
         return key
 
+    def default(self) -> object:
+        """The value an instance holds when the field is omitted, or ``MISSING``.
+
+        Factories aren't called and validated defaults aren't evaluated, so an
+        omitted field with either still skips the check.
+        """
+        info = self.field
+        validated = (
+            info.validate_default
+            if info.validate_default is not None
+            else self.model.model_config.get("validate_default", False)
+        )
+        if info.is_required() or info.default_factory is not None or validated:
+            return MISSING
+        return info.default
+
+    def input_names(self) -> tuple[str, ...] | None:
+        """Every top-level key Pydantic may read this field from, or None."""
+        alias = self.field.validation_alias or self.field.alias
+        if alias is None:
+            return (self.key,)
+        config = self.model.model_config
+        names = (
+            {self.key}
+            if config.get("validate_by_name") or config.get("populate_by_name")
+            else set()
+        )
+        if config.get("validate_by_alias", True):
+            for choice in alias.choices if isinstance(alias, AliasChoices) else [alias]:
+                if isinstance(choice, str):
+                    names.add(choice)
+                elif len(choice.path) == 1 and isinstance(choice.path[0], str):
+                    names.add(choice.path[0])
+                else:
+                    return None
+        return tuple(sorted(names))
+
 
 type Step = ContainerStep | ModelStep
 
@@ -268,6 +308,14 @@ def lookup(value: object, path: Path) -> object:
         else:
             return MISSING
     return value
+
+
+def absent(names: tuple[str, ...]) -> Schema:
+    required = [{"required": [name]} for name in names]
+    return {
+        "type": "object",
+        "not": required[0] if len(required) == 1 else {"anyOf": required},
+    }
 
 
 def conjunction(parts: list[Schema]) -> Schema:
@@ -356,6 +404,14 @@ class SchemaScope:
                     f"Referenced field {step.key!r} is omitted from the emitted schema"
                 )
             nodes = children
+
+
+@dataclass(frozen=True, slots=True)
+class Default[T]:
+    """An operand's value when one model field on its path is omitted."""
+
+    condition: Schema
+    value: T
 
 
 @dataclass(frozen=True, slots=True)
@@ -475,6 +531,47 @@ class Reference[T]:
             *(guard.dump(handler, schema) for guard in self._guards),
         ])
 
+    def _defaults(
+        self, handler: GetJsonSchemaHandler, schema: JsonSchemaValue
+    ) -> tuple[Default[T], ...]:
+        """One case per omitted model field on the path whose default Pydantic uses."""
+        path = self._data(handler, schema).path
+        defaults: list[Default[T]] = []
+        emitted = 0
+        for index, step in enumerate(self._steps):
+            if step.exported_key(handler) is None:
+                continue
+            if isinstance(step, ModelStep):
+                default = self._default(handler, schema, index, path[:emitted], step)
+                if default is not None:
+                    defaults.append(default)
+            emitted += 1
+        return tuple(defaults)
+
+    def _default(
+        self,
+        handler: GetJsonSchemaHandler,
+        schema: JsonSchemaValue,
+        index: int,
+        parent: Path,
+        step: ModelStep,
+    ) -> Default[T] | None:
+        value, names = step.default(), step.input_names()
+        if value is MISSING or names is None:
+            return None
+        conditions = [at(parent, absent(names), required=True)]
+        for guard in self._guards:
+            guarded = guard.reference._path
+            if len(guarded) <= index:
+                conditions.append(guard.dump(handler, schema))
+            elif type(lookup(value, guarded[index + 1 :])) not in guard.targets:
+                return None
+        value = lookup(value, self._path[index + 1 :])
+        if value is MISSING:
+            return None
+        # As in _resolve, the default's type is dynamic but matches the declared shape.
+        return Default(conjunction(conditions), cast(T, value))
+
 
 @dataclass(frozen=True, slots=True)
 class LiteralValue[T]:
@@ -493,6 +590,11 @@ class LiteralValue[T]:
         self, handler: GetJsonSchemaHandler, schema: JsonSchemaValue
     ) -> Schema:
         return True
+
+    def _defaults(
+        self, handler: GetJsonSchemaHandler, schema: JsonSchemaValue
+    ) -> tuple[Default[T], ...]:
+        return ()
 
 
 type Operand[T] = LiteralValue[T] | Reference[T]
