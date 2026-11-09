@@ -264,8 +264,10 @@ class ModelStep:
 
         As in Pydantic, a factory is called and a validated default is passed
         through the field's own validator. A factory that reads validated data,
-        or a default that fails validation, has no value known at export, so an
-        omitted field with either still skips the check.
+        a validated default whose validators take ``ValidationInfo`` (its data
+        holds other inputs), or a default that fails validation has no value
+        known at export, so an omitted field with any of them still skips the
+        check.
         """
         info = self.field
         if info.is_required() or info.default_factory_takes_validated_data:
@@ -288,7 +290,10 @@ class ModelStep:
 
     def input_paths(self) -> tuple[Path, ...] | None:
         """Every location Pydantic may read this field from, or None."""
-        alias = self.field.validation_alias or self.field.alias
+        # An empty string is a valid alias, so only None means there is none.
+        alias = self.field.validation_alias
+        if alias is None:
+            alias = self.field.alias
         if alias is None:
             return ((self.key,),)
         config = self.model.model_config
@@ -310,7 +315,11 @@ class ModelStep:
 
 
 def field_validator(model: type[BaseModel], key: str) -> SchemaValidator | None:
-    """A validator for one model field alone, without the model's own validators."""
+    """A validator for one model field alone, without the model's own validators.
+
+    None when the field can't be validated alone, including when one of its
+    validators takes ``ValidationInfo``, whose data only a model provides.
+    """
     core: Mapping[str, Any] = model.__pydantic_core_schema__
     definitions: list[CoreSchema] = []
     if core["type"] == "definitions":
@@ -334,9 +343,36 @@ def field_validator(model: type[BaseModel], key: str) -> SchemaValidator | None:
     inner = fields["fields"][key]["schema"]
     if inner["type"] == "default":
         inner = inner["schema"]
+    if reads_validation_info(inner, refs, set()):
+        return None
     if definitions:
         inner = core_schema.definitions_schema(inner, definitions)
     return SchemaValidator(inner, core.get("config"))
+
+
+def reads_validation_info(
+    schema: object, refs: Mapping[object, CoreSchema], seen: set[str]
+) -> bool:
+    """Whether a field schema runs a validator that takes ``ValidationInfo``.
+
+    A nested model validates with its own data, so the search stops there.
+    """
+    if isinstance(schema, list):
+        return any(reads_validation_info(item, refs, seen) for item in schema)
+    if not isinstance(schema, Mapping):
+        return False
+    kind = schema.get("type")
+    if kind == "model":
+        return False
+    if kind == "with-info":
+        return True
+    if kind == "definition-ref":
+        ref = schema["schema_ref"]
+        if ref in seen or ref not in refs:
+            return False
+        seen.add(ref)
+        return reads_validation_info(refs[ref], refs, seen)
+    return any(reads_validation_info(value, refs, seen) for value in schema.values())
 
 
 type Step = ContainerStep | ModelStep

@@ -14,6 +14,7 @@ from pydantic import (
     ConfigDict,
     Field,
     RootModel,
+    ValidationInfo,
     field_validator,
 )
 from pydantic.json_schema import JsonSchemaValue
@@ -360,6 +361,49 @@ def test_defaults_without_a_known_value_are_skipped() -> None:
 
     # Each omission still skips its check, so Ajv stays more lenient.
     assert "not" not in json.dumps(Defaults.model_json_schema()["allOf"])
+
+
+def test_validated_defaults_reading_validation_info_are_skipped() -> None:
+    class Bounds(BaseModel):
+        low: int
+        high: int = Field(default=0, validate_default=True)
+
+        @field_validator("high")
+        @classmethod
+        def above_low(cls, value: int, info: ValidationInfo) -> int:
+            return value or info.data["low"] + 1
+
+        @rule
+        @classmethod
+        def ordered(cls, x: RuleModel) -> Rule:
+            return x.low < x.high
+
+    # The default depends on low, so it has no value known at export.
+    assert Bounds(low=50).high == 51
+    assert default_branches(Bounds) == []
+
+
+def test_empty_validation_alias() -> None:
+    class Bounds(BaseModel):
+        low: int = Field(default=10, validation_alias="")
+        high: int
+
+        @rule
+        @classmethod
+        def ordered(cls, x: RuleModel) -> Rule:
+            return x.low <= x.high
+
+    # "" is the only input name, so the default applies when "" is absent.
+    assert Bounds.model_validate({"": 1, "high": 5}).low == 1
+    assert default_branches(Bounds) == [
+        {
+            "if": {"allOf": [omitted(""), present("high")]},
+            "then": {
+                "type": "object",
+                "properties": {"high": {"type": "number", "minimum": 10}},
+            },
+        }
+    ]
 
 
 def test_produced_validated_and_nested_defaults() -> None:

@@ -141,8 +141,8 @@ calls a `default_factory` once and runs a validated default
 (`validate_default=True`) through its field's validators, so both should be
 deterministic. Defaults the schema can't know at export time still skip the
 check when omitted: a factory that takes validated data, a validated default
-that fails validation, and a field read through an `AliasPath` with a negative
-index.
+whose validators take `ValidationInfo` or that fails validation, and a field
+read through an `AliasPath` with a negative index.
 
 For model fields whose names collide with helpers, use brackets, such as
 `x["when"]`.
