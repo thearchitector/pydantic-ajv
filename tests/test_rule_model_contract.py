@@ -378,7 +378,7 @@ def test_python_operators_keep_native_boolean_number_equality() -> None:
         Example(value=False)
 
 
-def test_default_factory_is_not_called_by_construction_or_dumping() -> None:
+def test_default_factory_is_called_by_dumping_not_construction() -> None:
     calls: list[str] = []
 
     def default() -> int:
@@ -394,14 +394,19 @@ def test_default_factory_is_not_called_by_construction_or_dumping() -> None:
             return x.value > 0
 
     assert calls == []
-    assert Example.model_json_schema()
-    assert calls == []
+    # The omitted value is checked against what the factory produces, 0.
+    branches = Example.model_json_schema()["allOf"][0]["allOf"]
+    assert branches[1] == {
+        "if": {"type": "object", "not": {"required": ["value"]}},
+        "then": False,
+    }
+    assert calls == ["called"]
     with pytest.raises(ValidationError):
         Example()
-    assert calls == ["called"]
+    assert calls == ["called", "called"]
 
 
-def test_changing_defaults_does_not_change_dumped_rule() -> None:
+def test_each_model_dumps_its_own_defaults() -> None:
     class Example(BaseModel):
         low: int = 2
         high: int = 5
@@ -415,13 +420,26 @@ def test_changing_defaults_does_not_change_dumped_rule() -> None:
         low: int = 9
         high: int = 0
 
+    def omitted_branch(model: type[BaseModel]) -> JsonSchemaValue:
+        branches = model.model_json_schema()["allOf"][0]["allOf"]
+        both_omitted = (
+            {"type": "object", "not": {"required": ["high"]}},
+            {"type": "object", "not": {"required": ["low"]}},
+        )
+        matches = [
+            branch
+            for branch in branches
+            if all(part in branch["if"].get("allOf", []) for part in both_omitted)
+        ]
+        assert len(matches) <= 1
+        return matches[0] if matches else {}
+
     assert Example()
     with pytest.raises(ValidationError):
         DifferentDefaults()
-    assert (
-        Example.model_json_schema()["allOf"]
-        == DifferentDefaults.model_json_schema()["allOf"]
-    )
+    # 2 < 5 needs no branch; 9 < 0 rejects a document that omits both.
+    assert omitted_branch(Example) == {}
+    assert omitted_branch(DifferentDefaults)["then"] is False
 
 
 def test_rule_factory_receives_a_model_specific_context_and_resolve_returns_bool() -> (

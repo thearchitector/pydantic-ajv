@@ -590,10 +590,10 @@ def test_conflicting_union_defaults_and_aliases() -> None:
     )
 
 
-def test_factory_runs_only_during_model_validation() -> None:
+def test_data_factory_runs_only_during_model_validation() -> None:
     calls = []
 
-    def make_default() -> int:
+    def make_default(data: dict[str, object]) -> int:
         calls.append(1)
         return 3
 
@@ -605,6 +605,7 @@ def test_factory_runs_only_during_model_validation() -> None:
         def positive(cls, x: RuleModel) -> Rule:
             return x.value > 0
 
+    # A factory reading validated data has no value at export.
     assert calls == []
     Factory.model_json_schema()
     assert calls == []
@@ -718,4 +719,43 @@ def test_exact_large_integer_comparison() -> None:
             {"low": 9007199254740993, "high": 9007199254740992},
         ],
         [True, False],
+    )
+
+
+def test_required_operand_with_a_defaulted_field() -> None:
+    class Bounds(BaseModel):
+        low: int = 10
+        high: int
+
+        @rule
+        @classmethod
+        def ordered(cls, x: RuleModel) -> Rule:
+            return x.low <= x.high
+
+    assert_native(
+        Bounds,
+        [{"high": 5}, {"high": 10}, {"low": 1, "high": 5}, {"low": 9, "high": 5}],
+        [False, True, True, False],
+    )
+
+
+def test_missing_dictionary_keys_skip_the_check() -> None:
+    class Budget(BaseModel):
+        limits: dict[str, int]
+
+        @rule
+        @classmethod
+        def ordered(cls, x: RuleModel) -> Rule:
+            return x.limits["low"] <= x.limits["high"]
+
+    assert_native(
+        Budget,
+        [
+            {"limits": {"low": 1, "high": 5}},
+            {"limits": {"low": 9, "high": 5}},
+            {"limits": {"high": 5}},
+            {"limits": {"low": 9}},
+            {"limits": {}},
+        ],
+        [True, False, True, True, True],
     )

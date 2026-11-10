@@ -1,41 +1,109 @@
 {
   "allOf": [
     {
-      "description": "Bounds must be ordered.",
-      "errorMessage": "low must precede high",
-      "if": {
-        "allOf": [
-          {
-            "properties": {
-              "low": true
-            },
-            "required": [
-              "low"
-            ],
-            "type": "object"
+      "allOf": [
+        {
+          "if": {
+            "allOf": [
+              {
+                "properties": {
+                  "low": true
+                },
+                "required": [
+                  "low"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "high": true
+                },
+                "required": [
+                  "high"
+                ],
+                "type": "object"
+              }
+            ]
           },
-          {
+          "then": {
             "properties": {
-              "high": true
+              "low": {
+                "exclusiveMaximum": {
+                  "$data": "1/high"
+                },
+                "type": "number"
+              }
             },
-            "required": [
-              "high"
-            ],
             "type": "object"
-          }
-        ]
-      },
-      "then": {
-        "properties": {
-          "low": {
-            "exclusiveMaximum": {
-              "$data": "1/high"
-            },
-            "type": "number"
           }
         },
-        "type": "object"
-      },
+        {
+          "if": {
+            "allOf": [
+              {
+                "not": {
+                  "required": [
+                    "high"
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "low": true
+                },
+                "required": [
+                  "low"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "then": {
+            "properties": {
+              "low": {
+                "exclusiveMaximum": 5,
+                "type": "number"
+              }
+            },
+            "type": "object"
+          }
+        },
+        {
+          "if": {
+            "allOf": [
+              {
+                "not": {
+                  "required": [
+                    "low"
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "high": true
+                },
+                "required": [
+                  "high"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "then": {
+            "properties": {
+              "high": {
+                "exclusiveMinimum": 2,
+                "type": "number"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ],
+      "description": "Bounds must be ordered.",
+      "errorMessage": "low must precede high",
       "title": "ordered"
     }
   ],
