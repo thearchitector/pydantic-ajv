@@ -20,11 +20,13 @@ from pydantic.fields import FieldInfo
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import (
     CoreSchema,
+    PydanticSerializationError,
     PydanticUndefined,
     PydanticUndefinedType,
     SchemaValidator,
     ValidationError,
     core_schema,
+    to_jsonable_python,
 )
 
 from .validation import (
@@ -659,6 +661,12 @@ class Reference[T]:
                 return None
         value = lookup(value, self._path[index + 1 :])
         if value is MISSING:
+            return None
+        # A default Ajv can't compare against, such as a sentinel object(), has
+        # no JSON value, so like Pydantic's own export it is left out.
+        try:
+            to_jsonable_python(value)
+        except PydanticSerializationError:
             return None
         # As in _resolve, the default's type is dynamic but matches the declared shape.
         return Default(conjunction(conditions), cast(T, value))

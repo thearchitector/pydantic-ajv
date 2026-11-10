@@ -363,6 +363,30 @@ def test_defaults_without_a_known_value_are_skipped() -> None:
     assert "not" not in json.dumps(Defaults.model_json_schema()["allOf"])
 
 
+@pytest.mark.parametrize(
+    "expression",
+    [lambda x: x.value < x.limit, lambda x: x.value < 5],
+    ids=["reference", "literal"],
+)
+def test_unserializable_defaults_are_skipped(
+    expression: Callable[[RuleModel], Rule],
+) -> None:
+    sentinel = object()
+
+    class Sentinel(BaseModel):
+        value: int = sentinel  # type: ignore[assignment]
+        limit: int
+
+        @rule
+        @classmethod
+        def check(cls, x: RuleModel) -> Rule:
+            return expression(x)
+
+    # Like Pydantic, which warns and leaves the default out, export still works.
+    with pytest.warns(UserWarning, match="not JSON serializable"):
+        assert default_branches(Sentinel) == []
+
+
 def test_validated_defaults_reading_validation_info_are_skipped() -> None:
     class Bounds(BaseModel):
         low: int
