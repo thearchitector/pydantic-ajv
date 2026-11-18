@@ -706,8 +706,11 @@ class Projection:
             raise RuleDefinitionError(
                 "unique_by requires one concrete object item type"
             )
-        item = Reference[object](items[0])
-        shape, steps = item._child(key)
+        item = items[0]
+        if key == item.discriminator:
+            # Every alternative of a tagged union has the tag, under one alias.
+            item = TypeShape(item.alternatives[0])
+        shape, steps = Reference[object](item)._child(key)
         require_shape(shape, SCALARS, "unique_by requires primitive property values")
         return cls(steps[0])
 
