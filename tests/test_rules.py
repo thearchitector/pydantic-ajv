@@ -253,6 +253,33 @@ def test_unique_by() -> None:
     )
 
 
+def test_unique_by_union_tag() -> None:
+    class Number(BaseModel):
+        kind: Literal["number"] = Field(alias="itemKind")
+
+    class Text(BaseModel):
+        kind: Literal["text"] = Field(alias="itemKind")
+
+    class Items(BaseModel):
+        items: list[Annotated[Number | Text, Field(discriminator="kind")]]
+
+        @rule
+        @classmethod
+        def kinds(cls, x: RuleModel) -> Rule:
+            return x.items.unique_by("kind")
+
+    assert_native(
+        Items,
+        [
+            {"items": [{"itemKind": "number"}, {"itemKind": "text"}]},
+            {"items": [{"itemKind": "text"}, {"itemKind": "text"}]},
+        ],
+        [True, False],
+    )
+    then = rule_annotations(Items, "kinds")["then"]
+    assert then["properties"]["items"]["uniqueItemProperties"] == ["itemKind"]
+
+
 def test_root_model() -> None:
     class Increasing(RootModel[list[int]]):
         @rule
